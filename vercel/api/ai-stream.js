@@ -18,8 +18,43 @@ export default async function handler(req, res) {
   }
 
   try {
-    const secret = req.headers['x-barrix-secret'];
-    if (!secret || secret !== process.env.BARRIX_SERVERLESS_SECRET) {
+    // Authenticate: accept either a direct shared secret header (x-barrix-secret)
+    // or a short-lived token (x-barrix-token) minted by WordPress.
+    const directSecret = req.headers['x-barrix-secret'];
+    const token = req.headers['x-barrix-token'];
+    const serverlessSecret = process.env.BARRIX_SERVERLESS_SECRET;
+
+    let authOk = false;
+    if (directSecret && serverlessSecret && directSecret === serverlessSecret) {
+      authOk = true;
+    }
+
+    // Validate short-lived token if provided
+    if (!authOk && token && serverlessSecret) {
+      try {
+        const parts = token.split('.');
+        if (parts.length === 2) {
+          const b64 = parts[0];
+          const sig_b64 = parts[1];
+          const payload_json = Buffer.from(b64.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+          const expectedSig = require('crypto').createHmac('sha256', serverlessSecret).update(b64).digest();
+          const sigBuf = Buffer.from(sig_b64.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+          if (sigBuf.length === expectedSig.length && require('crypto').timingSafeEqual(sigBuf, expectedSig)) {
+            const payload = JSON.parse(payload_json);
+            const now = Math.floor(Date.now() / 1000);
+            if (payload.exp && payload.exp >= now) {
+              authOk = true;
+              // Optionally expose payload info to upstream logic
+              req.__barrix_token_payload = payload;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Invalid token', e);
+      }
+    }
+
+    if (!authOk) {
       res.status(403).json({ error: 'Forbidden' });
       return;
     }
